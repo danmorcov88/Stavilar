@@ -114,6 +114,7 @@ class PutClickHouseRecordTest {
     void insertSettingsDefaults() {
         final Map<String, String> settings = PutClickHouseRecord.insertSettings(runner.getProcessContext(), new MockFlowFile(1));
         assertEquals("best_effort", settings.get("date_time_input_format"));
+        assertEquals("0", settings.get("input_format_skip_unknown_fields"));
         assertEquals("0", settings.get("async_insert"));
         assertEquals("1", settings.get("wait_end_of_query"));
         assertFalse(settings.containsKey("wait_for_async_insert"));

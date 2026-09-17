@@ -51,7 +51,8 @@ import java.util.UUID;
                 + "for example ch.setting.max_insert_block_size = 1048576. Overrides the same setting on the connection service.",
         expressionLanguageScope = ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
 @WritesAttributes({
-        @WritesAttribute(attribute = PutClickHouseRecord.ATTR_ROWS_WRITTEN, description = "Rows written as reported by ClickHouse, summed over all inserts"),
+        @WritesAttribute(attribute = PutClickHouseRecord.ATTR_ROWS_WRITTEN, description = "Rows accepted by ClickHouse, summed over all inserts. "
+                + "An insert dropped by deduplication still reports its rows."),
         @WritesAttribute(attribute = PutClickHouseRecord.ATTR_INSERTS, description = "Number of insert requests made for the FlowFile"),
         @WritesAttribute(attribute = PutClickHouseRecord.ATTR_QUERY_ID, description = "ClickHouse query id of each insert, comma-separated"),
         @WritesAttribute(attribute = PutClickHouseRecord.ATTR_ERROR, description = "Error message when routed to failure or retry")})
@@ -264,6 +265,8 @@ public class PutClickHouseRecord extends AbstractProcessor {
     static Map<String, String> insertSettings(final ProcessContext context, final FlowFile flowFile) {
         final Map<String, String> settings = new java.util.LinkedHashMap<>();
         settings.put("date_time_input_format", "best_effort");
+        // ClickHouse drops unknown JSON fields by default; a record field without a column is a failure here, not silent loss.
+        settings.put("input_format_skip_unknown_fields", "0");
         if (context.getProperty(ASYNC_INSERT).asBoolean()) {
             settings.put("async_insert", "1");
             settings.put("wait_for_async_insert", "1");
