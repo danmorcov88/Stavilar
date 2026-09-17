@@ -3,6 +3,7 @@ package io.github.danmorcov88.stavilar.service;
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.enums.Protocol;
 import io.github.danmorcov88.stavilar.api.ClickHouseConnectionService;
+import io.github.danmorcov88.stavilar.api.ClickHouseSettings;
 import io.github.danmorcov88.stavilar.service.EndpointsValidator.HostPort;
 import org.apache.nifi.annotation.behavior.DynamicProperty;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
@@ -37,8 +38,6 @@ import java.util.concurrent.TimeUnit;
                 + "for example ch.setting.max_execution_time = 60. Processors can override these per operation.",
         expressionLanguageScope = ExpressionLanguageScope.ENVIRONMENT)
 public class StandardClickHouseConnectionService extends AbstractControllerService implements ClickHouseConnectionService {
-
-    static final String SETTING_PREFIX = "ch.setting.";
 
     public static final PropertyDescriptor ENDPOINTS = new PropertyDescriptor.Builder()
             .name("Endpoints")
@@ -132,16 +131,16 @@ public class StandardClickHouseConnectionService extends AbstractControllerServi
                 .name(propertyDescriptorName)
                 .dynamic(true)
                 .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT);
-        if (propertyDescriptorName.startsWith(SETTING_PREFIX) && propertyDescriptorName.length() > SETTING_PREFIX.length()) {
+        if (ClickHouseSettings.isSetting(propertyDescriptorName)) {
             return builder
-                    .description("ClickHouse server setting " + propertyDescriptorName.substring(SETTING_PREFIX.length()))
+                    .description("ClickHouse server setting " + ClickHouseSettings.settingName(propertyDescriptorName))
                     .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
                     .build();
         }
         return builder
                 .addValidator((subject, input, context) -> new ValidationResult.Builder()
                         .subject(subject).input(input).valid(false)
-                        .explanation("dynamic properties must be named " + SETTING_PREFIX + "<setting name>")
+                        .explanation("dynamic properties must be named " + ClickHouseSettings.PREFIX + "<setting name>")
                         .build())
                 .build();
     }
@@ -239,9 +238,9 @@ public class StandardClickHouseConnectionService extends AbstractControllerServi
         final Map<String, String> settings = new LinkedHashMap<>();
         for (final Map.Entry<PropertyDescriptor, String> entry : context.getProperties().entrySet()) {
             final PropertyDescriptor descriptor = entry.getKey();
-            if (descriptor.isDynamic() && descriptor.getName().startsWith(SETTING_PREFIX)) {
+            if (descriptor.isDynamic() && ClickHouseSettings.isSetting(descriptor.getName())) {
                 final String value = context.getProperty(descriptor).evaluateAttributeExpressions().getValue();
-                settings.put(descriptor.getName().substring(SETTING_PREFIX.length()), value);
+                settings.put(ClickHouseSettings.settingName(descriptor.getName()), value);
             }
         }
         return Collections.unmodifiableMap(settings);
