@@ -5,3 +5,4 @@ All notable changes to this project are listed here.
 ## Unreleased
 
 - Project skeleton: Maven modules, three NARs, GitHub Actions CI.
+- `ClickHouseConnectionService` controller service: endpoints with failover, TLS trust store, LZ4, timeouts, `ch.setting.*` server settings.
