@@ -192,13 +192,10 @@ public class StandardClickHouseConnectionService extends AbstractControllerServi
         settings.forEach(builder::serverSetting);
 
         final Client newClient = builder.build();
+        final String serverVersion;
         try {
-            if (!newClient.ping()) {
-                throw new InitializationException("ClickHouse did not answer the ping on " + endpoints);
-            }
-        } catch (final InitializationException e) {
-            newClient.close();
-            throw e;
+            // A real query instead of ping(): ping() hides the server's error message.
+            serverVersion = newClient.queryAll("SELECT version() AS v").get(0).getString("v");
         } catch (final RuntimeException e) {
             newClient.close();
             throw new InitializationException("Could not connect to ClickHouse on " + endpoints + ": " + e.getMessage(), e);
@@ -207,7 +204,7 @@ public class StandardClickHouseConnectionService extends AbstractControllerServi
         client = newClient;
         defaultSettings = settings;
         database = db;
-        getLogger().info("Connected to ClickHouse {} on {}", newClient.getServerVersion(), endpoints);
+        getLogger().info("Connected to ClickHouse {} on {}", serverVersion, endpoints);
     }
 
     @OnDisabled
