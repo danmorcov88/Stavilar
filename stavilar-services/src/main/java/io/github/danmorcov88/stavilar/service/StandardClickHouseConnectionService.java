@@ -24,8 +24,6 @@ import org.apache.nifi.ssl.SSLContextService;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -127,22 +125,7 @@ public class StandardClickHouseConnectionService extends AbstractControllerServi
 
     @Override
     protected PropertyDescriptor getSupportedDynamicPropertyDescriptor(final String propertyDescriptorName) {
-        final PropertyDescriptor.Builder builder = new PropertyDescriptor.Builder()
-                .name(propertyDescriptorName)
-                .dynamic(true)
-                .expressionLanguageSupported(ExpressionLanguageScope.ENVIRONMENT);
-        if (ClickHouseSettings.isSetting(propertyDescriptorName)) {
-            return builder
-                    .description("ClickHouse server setting " + ClickHouseSettings.settingName(propertyDescriptorName))
-                    .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
-                    .build();
-        }
-        return builder
-                .addValidator((subject, input, context) -> new ValidationResult.Builder()
-                        .subject(subject).input(input).valid(false)
-                        .explanation("dynamic properties must be named " + ClickHouseSettings.PREFIX + "<setting name>")
-                        .build())
-                .build();
+        return ClickHouseSettings.dynamicProperty(propertyDescriptorName, ExpressionLanguageScope.ENVIRONMENT);
     }
 
     @Override
@@ -165,7 +148,7 @@ public class StandardClickHouseConnectionService extends AbstractControllerServi
                 context.getProperty(ENDPOINTS).evaluateAttributeExpressions().getValue());
         final boolean useTls = context.getProperty(USE_TLS).asBoolean();
         final String db = context.getProperty(DATABASE).evaluateAttributeExpressions().getValue();
-        final Map<String, String> settings = readSettings(context);
+        final Map<String, String> settings = ClickHouseSettings.read(context, ExpressionLanguageScope.ENVIRONMENT, null);
 
         final Client.Builder builder = new Client.Builder()
                 .setUsername(context.getProperty(USERNAME).evaluateAttributeExpressions().getValue())
@@ -232,18 +215,6 @@ public class StandardClickHouseConnectionService extends AbstractControllerServi
     @Override
     public String getDatabase() {
         return database;
-    }
-
-    private static Map<String, String> readSettings(final ConfigurationContext context) {
-        final Map<String, String> settings = new LinkedHashMap<>();
-        for (final Map.Entry<PropertyDescriptor, String> entry : context.getProperties().entrySet()) {
-            final PropertyDescriptor descriptor = entry.getKey();
-            if (descriptor.isDynamic() && ClickHouseSettings.isSetting(descriptor.getName())) {
-                final String value = context.getProperty(descriptor).evaluateAttributeExpressions().getValue();
-                settings.put(ClickHouseSettings.settingName(descriptor.getName()), value);
-            }
-        }
-        return Collections.unmodifiableMap(settings);
     }
 
     private String clientName() {
