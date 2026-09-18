@@ -2,6 +2,34 @@
 
 Working notes per phase: what was done, what is left, decisions taken.
 
+## Phase 5 — release 1.0.0 (2026-09-18)
+
+Done:
+- Pre-release check on the Phase 4 tree: `mvn clean verify -Pintegration-tests` green locally; the three NARs loaded
+  into a fresh `apache/nifi:2.12.0` through `nar_extensions/` with 0 `ERROR` lines and all four components registered.
+- `.github/workflows/release.yml`: on a `v*` tag push, builds the NARs (`mvn clean package -DskipTests`), takes the
+  release notes from the matching `## <version>` section of CHANGELOG.md (fails if there is none), appends an install
+  line, and publishes the GitHub Release with `softprops/action-gh-release` (three NARs as assets).
+- Version 1.0.0 in the parent and the six module POMs (`mvn versions:set`), CHANGELOG section `1.0.0 — 2026-09-18`,
+  commit `Release 1.0.0`, annotated tag `v1.0.0`. Release page checked: three assets, notes render, manifest of a
+  downloaded NAR says `Nar-Version: 1.0.0`.
+- main moved to `1.1.0-SNAPSHOT`.
+
+Decisions:
+- The release workflow went in one commit before the release commit: a tag-push workflow runs from the tagged
+  commit, so it has to exist there.
+- Release build skips tests. CI runs the full suite on the same commit through the `main` push; the release job only
+  packages.
+- Release notes are the CHANGELOG section, nothing else. One place to write them, no duplication.
+- Release name is `Stavilar 1.0.0` (without the `v`), tag stays `v1.0.0`.
+
+Left for later:
+- Maven Central: not done. Needs a Sonatype account, GPG signing and namespace verification for
+  `io.github.danmorcov88`; a separate piece of work if the NARs should be resolvable as Maven artifacts.
+- Announcements (NiFi users list, ClickHouse docs integrations page, awesome-nifi): texts drafted, nothing sent.
+- Next release: add bullets under `## Unreleased`, rename the heading to the version and date, `versions:set`,
+  commit, tag `vX.Y.Z`, push; the workflow does the rest. Then bump to the next SNAPSHOT.
+
 ## Phase 4 — ExecuteClickHouseStatement, docs, examples (2026-09-18)
 
 Done:
