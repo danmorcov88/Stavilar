@@ -2,6 +2,47 @@
 
 Working notes per phase: what was done, what is left, decisions taken.
 
+## Phase 2b — RowBinary (2026-09-18)
+
+Done:
+- `RowBinaryEncoder`: all v1 types (`Int8..Int256`, `UInt8..UInt256`, `Float32/64`, `Decimal`, `String`, `FixedString`,
+  `Bool`, `UUID`, `Date`, `Date32`, `DateTime`, `DateTime64`, `Enum8/16`, `Nullable`, `LowCardinality`, `Array`), with
+  value coercion from whatever a NiFi reader hands back (typed objects or strings).
+- 47 byte-level fixtures generated with `clickhouse-local` from the 26.8 image (`src/test/resources/rowbinary/`,
+  `generate.sh` regenerates them); every fixture is checked from several Java input kinds.
+- `Insert Format` property on `PutClickHouseRecord`, default `RowBinary`; JSONEachRow kept.
+- Table columns cached per target; column list per FlowFile from the record schema; missing columns get DEFAULT.
+- Integration tests for both formats (1M rows, all types, unknown column/table), plus RowBinary-only: DEFAULT fill,
+  schema refresh after `ALTER TABLE ADD COLUMN`, `Map` column → failure with the JSONEachRow hint.
+- Real NiFi 2.12.0 through REST: `INSERT INTO events (id, name, ts) FORMAT RowBinary`, `loaded DateTime DEFAULT now()`
+  filled by the server, two loads with the same token → no duplicates, no log errors.
+
+Benchmark (same machine, ClickHouse 26.8 in Docker, 1M CSV rows, 10 inserts): RowBinary 1.0 s, JSONEachRow 1.4 s.
+Reading the CSV is 0.5 s of both.
+
+Decisions:
+- Column list instead of `RowBinaryWithDefaults`. `INSERT INTO t (a, b) FORMAT RowBinary` works on every version and
+  is what a user would write; `RowBinaryWithDefaults` needs a flag byte per value.
+- Table schema comes from `system.columns`, not `Client.getTableSchema()`. client-v2 0.10.0 parses `DESCRIBE TABLE`
+  and fails on ClickHouse 26.8 ("Non-null columnName and columnType are required"). `system.columns` also says which
+  columns are ALIAS/MATERIALIZED; a record field for such a column is rejected instead of failing on the server.
+- The schema cache is refreshed in two cases: after a server error on the table, and when a record field is unknown
+  to the cached schema (one refresh, then the error stands). So `ALTER TABLE ADD COLUMN` works without a restart.
+- `null` for a non-Nullable column writes the type default (0, "", 1970-01-01, first enum value). Same as ClickHouse's
+  `input_format_null_as_default` for text formats, so both formats behave alike.
+- The encoding is resolved on the first record, so an empty FlowFile makes no request and an unreadable one does not
+  touch the network (matters for the failure/retry routing).
+- `isRetryable` walks the whole cause chain: client-v2 wraps a transport failure in a generic
+  `ClientException("Failed to get query response")` on the query path used for the schema.
+- Timestamps as strings go through a hand-written ISO parser (`yyyy-MM-dd[T ]HH:mm:ss[.f][Z|±HH:mm]`) with java.time as
+  fallback; `OffsetDateTime.parse` alone cost ~0.7 s per million rows. Same for decimals: `BigDecimal.precision()` and a
+  long fast path for Decimal32/64. Without these RowBinary was slower than JSONEachRow from CSV.
+- `LocalDateTime` and ISO strings without offset are taken in the JVM zone, as in the JSON path and in NiFi generally.
+
+Left for later:
+- Map, Tuple, Nested, IPv4/IPv6, JSON, Variant in RowBinary (brief: optional after v1).
+- `Time`/`Time64` column types (new in ClickHouse 25.x) are not mapped.
+
 ## Phase 2a — PutClickHouseRecord, JSONEachRow (2026-09-17)
 
 Done:

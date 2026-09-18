@@ -4,12 +4,12 @@ Native ClickHouse bundle for Apache NiFi 2.x, built on the official ClickHouse J
 
 A *stăvilar* is a sluice gate: it controls how much water flows and when. Here it controls the flow from NiFi into ClickHouse.
 
-**Status: work in progress.** The connection service and `PutClickHouseRecord` (JSONEachRow) work. See [NOTES.md](NOTES.md) for what is done and what comes next.
+**Status: work in progress.** The connection service and `PutClickHouseRecord` (RowBinary and JSONEachRow) work. See [NOTES.md](NOTES.md) for what is done and what comes next.
 
 ## Components
 
 - `ClickHouseConnectionService`: a controller service that holds a `client-v2` client (HTTP, LZ4, failover between endpoints). Done.
-- `PutClickHouseRecord`: bulk inserts from any NiFi Record Reader, with insert deduplication tokens so retries do not create duplicate rows. Done (JSONEachRow; RowBinary comes next).
+- `PutClickHouseRecord`: bulk inserts from any NiFi Record Reader as RowBinary or JSONEachRow, with insert deduplication tokens so retries do not create duplicate rows. Done.
 - `QueryClickHouseRecord`: streams query results into FlowFiles through a Record Writer, without holding the whole result in memory. Planned.
 - `ExecuteClickHouseStatement`: runs DDL/DML that returns no rows. Planned.
 
@@ -70,6 +70,7 @@ Copy the three NARs into NiFi's `lib/` directory (or `nar_extensions/` for hot l
 | Record Reader | | any NiFi Record Reader |
 | Database | service database | optional, supports Expression Language |
 | Table | | target table, supports Expression Language |
+| Insert Format | RowBinary | `RowBinary` (binary, uses the table schema) or `JSONEachRow` (text, parsed by the server) |
 | Max Rows Per Insert | 100000 | larger FlowFiles are sent in several inserts; one insert is held in memory at a time |
 | Deduplication Token | None | `None`, `FlowFile UUID` or `Attribute` (+ `Deduplication Token Attribute`) |
 | Async Insert | false | `async_insert=1`, `wait_for_async_insert=1`; cannot be combined with a token |
@@ -78,7 +79,7 @@ Copy the three NARs into NiFi's `lib/` directory (or `nar_extensions/` for hot l
 
 Relationships: `success`; `failure` for data, schema and table errors (unknown column, bad value, missing table) and unreadable input; `retry` for network problems and server conditions ClickHouse marks retryable (too many parts, memory limit, timeouts). Failed FlowFiles carry the server message in `clickhouse.error`.
 
-Settings the processor sends on its own, all overridable with `ch.setting.*`: `date_time_input_format=best_effort` (timestamps go out as ISO-8601 in UTC), `input_format_skip_unknown_fields=0` (a record field without a column is an error, not silent loss), `async_insert=0` unless Async Insert is on (recent ClickHouse versions default to async inserts).
+Settings the processor sends on its own, all overridable with `ch.setting.*`: `async_insert=0` unless Async Insert is on (recent ClickHouse versions default to async inserts); with JSONEachRow also `date_time_input_format=best_effort` (timestamps go out as ISO-8601 in UTC) and `input_format_skip_unknown_fields=0` (a record field without a column is an error, not silent loss).
 
 ### Deduplication
 
@@ -88,7 +89,34 @@ Settings the processor sends on its own, all overridable with `ch.setting.*`: `d
 - `clickhouse.rows.written` counts the rows ClickHouse accepted in the request; an insert dropped by deduplication still reports its rows.
 - Async inserts ignore the token, so the processor refuses that combination.
 
-### Value encoding (JSONEachRow)
+### RowBinary (default)
+
+The processor reads the table's columns from `system.columns` once per table and caches them (the cache is refreshed after a server error or when a record has a field the cached schema does not know, so `ALTER TABLE ADD COLUMN` needs no restart). Each FlowFile inserts the columns its records have, in table order: `INSERT INTO t (a, b, c) FORMAT RowBinary`. Table columns the records do not have get their `DEFAULT`. A record field without a column, or matching an `ALIAS`/`MATERIALIZED` column, routes the FlowFile to `failure`.
+
+Type mapping. The left column is the ClickHouse column type; the right column lists the record values accepted for it.
+
+| ClickHouse | Accepted record values |
+|---|---|
+| `Int8..Int64`, `UInt8..UInt32` | any integer number, integer string, boolean; out of range → failure |
+| `UInt64`, `Int128/256`, `UInt128/256` | as above plus `BigInteger`, `BigDecimal`, decimal string |
+| `Float32/64` | any number, numeric string |
+| `Decimal(P, S)` | `BigDecimal`, any number, numeric string; rounded half-up to S, more than P digits → failure |
+| `String` | any value via `toString()`; `byte[]` written as is |
+| `FixedString(N)` | string or `byte[]` of at most N bytes, zero-padded |
+| `Bool` | boolean, number (≠ 0), `"true"/"false"/"1"/"0"/"yes"/"no"` |
+| `UUID` | `UUID`, string |
+| `Date`, `Date32` | `LocalDate`, `java.sql.Date`, `"yyyy-MM-dd"`, any timestamp (its UTC date), integer (days since 1970-01-01) |
+| `DateTime`, `DateTime64(P)` | `Timestamp`, `Date`, `Instant`, `OffsetDateTime`, `ZonedDateTime`, `LocalDateTime` (JVM zone), ISO-8601 string (`2024-03-15T11:45:10.123Z`, `2024-03-15 11:45:10`, offsets), number (epoch seconds, fraction allowed) |
+| `Enum8/16` | name, number, numeric string |
+| `Nullable(T)` | `null` → NULL, otherwise as T |
+| `LowCardinality(T)` | as T |
+| `Array(T)` | `Object[]`, primitive array, `Collection`; elements as T |
+
+`null` for a column that is not `Nullable` becomes the type's default (0, empty string, `1970-01-01`, first enum value), which is what ClickHouse does for text formats with `input_format_null_as_default`.
+
+Not supported by RowBinary in this version: `Map`, `Tuple`, `Nested`, `JSON`, `Variant`, `IPv4`/`IPv6`, geo types. A table with such a column routes to `failure` with a message that says to use `Insert Format = JSONEachRow`.
+
+### JSONEachRow
 
 | NiFi value | JSON |
 |---|---|
@@ -100,6 +128,17 @@ Settings the processor sends on its own, all overridable with `ch.setting.*`: `d
 | byte[] | base64 string |
 | arrays, collections | JSON array |
 | maps, nested records | JSON object |
+
+### Benchmark
+
+1,000,000 rows from a CSV FlowFile (`id UInt64, name String, ts DateTime64(3), amount Decimal(18,4)`, all values arrive as strings from `CSVReader`), 10 inserts of 100,000 rows, ClickHouse 26.8 in Docker on the same machine (Windows 10, JDK 21), measured inside the integration test:
+
+| Insert Format | Time |
+|---|---|
+| RowBinary | 1.0 s |
+| JSONEachRow | 1.4 s |
+
+Reading the CSV alone takes 0.5 s of that. Run `mvn verify -Pintegration-tests` to see the numbers for your machine.
 
 ## License
 

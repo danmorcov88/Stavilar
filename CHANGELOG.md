@@ -6,4 +6,4 @@ All notable changes to this project are listed here.
 
 - Project skeleton: Maven modules, three NARs, GitHub Actions CI.
 - `ClickHouseConnectionService` controller service: endpoints with failover, TLS trust store, LZ4, timeouts, `ch.setting.*` server settings.
-- `PutClickHouseRecord` processor: JSONEachRow inserts from any Record Reader, batching, insert deduplication tokens, async insert option, `success`/`failure`/`retry` routing.
+- `PutClickHouseRecord` processor: RowBinary (default) or JSONEachRow inserts from any Record Reader, batching, insert deduplication tokens, async insert option, `success`/`failure`/`retry` routing.
