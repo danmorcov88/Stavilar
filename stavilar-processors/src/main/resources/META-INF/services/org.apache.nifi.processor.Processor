@@ -1,2 +1,3 @@
 io.github.danmorcov88.stavilar.processors.PutClickHouseRecord
 io.github.danmorcov88.stavilar.processors.QueryClickHouseRecord
+io.github.danmorcov88.stavilar.processors.ExecuteClickHouseStatement
