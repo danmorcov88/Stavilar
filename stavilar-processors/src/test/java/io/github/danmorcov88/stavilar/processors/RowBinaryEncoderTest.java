@@ -87,7 +87,7 @@ class RowBinaryEncoderTest {
                 "2024-03-15 13:45:10", "2024-03-15T13:45:10", 1710503110L, 1710503110.0));
         INPUTS.put("datetime64_ms", List.of(Instant.parse("2024-03-15T11:45:10.123Z"), Timestamp.from(Instant.parse("2024-03-15T11:45:10.123Z")),
                 "2024-03-15T11:45:10.123Z", new BigDecimal("1710503110.123"), 1710503110.123));
-        INPUTS.put("datetime64_ns", List.of(Instant.parse("2024-03-15T11:45:10.123456789Z"), Timestamp.valueOf(LocalDateTime.of(2024, 3, 15, 13, 45, 10, 123_456_789))));
+        INPUTS.put("datetime64_ns", List.of(Instant.parse("2024-03-15T11:45:10.123456789Z"), Timestamp.from(Instant.parse("2024-03-15T11:45:10.123456789Z"))));
         INPUTS.put("datetime64_before_epoch", List.of(Instant.parse("1969-12-31T23:59:59.500Z"), new BigDecimal("-0.5")));
         INPUTS.put("enum8", List.of("b", 2, "2"));
         INPUTS.put("enum16_neg", List.of("x", -5, "-5"));
