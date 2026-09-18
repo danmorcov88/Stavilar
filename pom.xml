@@ -245,6 +245,8 @@
                             </execution>
                         </executions>
                         <configuration>
+                            <!-- Small heap on purpose: the streaming tests must not grow memory with the data size. -->
+                            <argLine>-Xmx512m</argLine>
                             <systemPropertyVariables>
                                 <clickhouse.image>${clickhouse.image}</clickhouse.image>
                             </systemPropertyVariables>
