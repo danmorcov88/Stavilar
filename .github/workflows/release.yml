@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build NARs and publish the release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build
+        run: mvn -B clean package -DskipTests
+      - name: Release notes from CHANGELOG
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          awk -v v="$VERSION" '
+            /^## / { on = ($2 == v) ; next }
+            on { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "CHANGELOG.md has no section for $VERSION" >&2
+            exit 1
+          fi
+          printf '\n## Install\n\nCopy the three NARs into NiFi'"'"'s `lib/` directory and restart, or drop them into `nar_extensions/`. See the [README](https://github.com/%s/blob/v%s/README.md#install).\n' "$GITHUB_REPOSITORY" "$VERSION" >> release-notes.md
+          cat release-notes.md
+      - name: Publish
+        uses: softprops/action-gh-release@v3.0.3
+        with:
+          name: Stavilar ${{ steps.notes.outputs.version }}
+          body_path: release-notes.md
+          files: '**/target/*.nar'
+          fail_on_unmatched_files: true
