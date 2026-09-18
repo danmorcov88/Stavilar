@@ -15,3 +15,6 @@ Thumbs.db
 
 # local working notes
 tasks/
+
+# local IDE state
+.claude/

@@ -2,6 +2,33 @@
 
 Working notes per phase: what was done, what is left, decisions taken.
 
+## Phase 4 — ExecuteClickHouseStatement, docs, examples (2026-09-18)
+
+Done:
+- `ExecuteClickHouseStatement`: statement from property (EL) or content, `ch.setting.*`, `X-ClickHouse-Summary` →
+  `clickhouse.summary.*` attributes (parsed with jackson-core), `success`/`failure`/`retry`.
+  IT covers CREATE → INSERT SELECT → ALTER DELETE with `mutations_sync=1` → OPTIMIZE → TRUNCATE → DROP, EL, content, errors.
+- `additionalDetails.md` for the four components, in `src/main/resources/docs/<FQCN>/` (the layout NiFi 2.12 uses);
+  NiFi serves them at `/nifi-api/flow/additional-details/...` (checked). A unit test per module fails if a registered
+  component has no docs page.
+- `examples/`: three flow definitions exported from NiFi 2.12 through `GET /process-groups/{id}/download`, built in
+  the Docker NiFi with the REST API: CSV → ClickHouse (dedup + NiFi retry), PostgreSQL → ClickHouse (QueryDatabaseTableRecord,
+  dedup), ClickHouse → JSON. Passwords are not exported; `examples/README.md` says what to set.
+- README rewritten around a 15-minute quick start. Walked through on a fresh NiFi + ClickHouse pair by doing only what
+  the README says (import the definition, set password and endpoints, enable, start): 3 rows with the token, 0 log errors.
+
+Decisions:
+- A `SELECT` through `ExecuteClickHouseStatement` is not rejected; the body is discarded and the summary still arrives.
+  Simpler than guessing statement kinds from SQL text.
+- Multi-statement content is not split. ClickHouse HTTP takes one statement per request; splitting on `;` would break
+  on string literals and is not worth it.
+- The example flows use NiFi's own retry (`retriedRelationships` on `retry`, 10 times with backoff) instead of a loop
+  connection; the FlowFile uuid survives it, so the token stays the same.
+- Detailed type tables moved from README into the component docs; README keeps condensed tables and links.
+
+Left for later:
+- Phase 5: version 1.0.0, tag, GitHub Release with the NARs, announcement.
+
 ## Phase 3 — QueryClickHouseRecord (2026-09-18)
 
 Done:
