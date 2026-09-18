@@ -5,7 +5,6 @@ import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import org.apache.nifi.serialization.record.Record;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigDecimal;
@@ -31,7 +30,7 @@ import java.util.UUID;
  * {@code HH:mm:ss}, timestamps as ISO-8601 in UTC ({@code 2024-01-01T12:00:00.123Z}).
  * The processor sends {@code date_time_input_format=best_effort} so the ISO form parses.
  */
-final class JsonEachRowEncoder implements Closeable {
+final class JsonEachRowEncoder implements RowEncoder {
 
     private static final JsonFactory FACTORY = new JsonFactory();
     private static final DateTimeFormatter DATE = DateTimeFormatter.ISO_LOCAL_DATE;
@@ -52,13 +51,15 @@ final class JsonEachRowEncoder implements Closeable {
         this.localZone = localZone;
     }
 
-    void write(final Record record) throws IOException {
+    @Override
+    public void write(final Record record) throws IOException {
         writeRecord(record);
         generator.writeRaw('\n');
         rows++;
     }
 
-    long getRowCount() {
+    @Override
+    public long getRowCount() {
         return rows;
     }
 
