@@ -2,6 +2,39 @@
 
 Working notes per phase: what was done, what is left, decisions taken.
 
+## Phase 3 — QueryClickHouseRecord (2026-09-18)
+
+Done:
+- `QueryClickHouseRecord`: SQL from property (EL) or FlowFile content, `RowBinaryWithNamesAndTypes` through client-v2's
+  binary reader, any Record Writer, optional split with `fragment.*`, `ch.setting.*` per query, `success`/`failure`/`original`.
+- `ClickHouseRecordSchema` (column types → NiFi record schema) and `ClickHouseValues` (reader values → record values).
+- Integration tests: all types through Avro and back, empty result, 5M rows split into 5 FlowFiles under `-Xmx512m`
+  (73 MB Avro in 2.3 s), SQL error, query from content with `original`, EL in the query, settings in `query_log`, JSON writer.
+- Real NiFi 2.12.0 through REST: 2500 rows → 3 JSON FlowFiles (1000/1000/500) with fragment attributes, no log errors.
+- `InsertErrors` renamed to `ClickHouseErrors`; both processors use it.
+
+Decisions:
+- Streaming: `session.write(flowFile)` gives an OutputStream that stays open while rows arrive; the reader pulls from the
+  HTTP stream. One row is live at a time. The failsafe JVM runs with `-Xmx512m` so a regression would fail the build.
+- `fragment.count` is only known at the end, so it is set on all fragments after the loop.
+- The reader returns `ArrayValue` and `EnumValue` from `com.clickhouse.client.api.data_formats.internal`. They are public
+  but the package is named "internal"; only `ClickHouseValues` touches them, so a client-v2 change stays local.
+- `DateTime` values arrive as `ZonedDateTime` in the column's zone and are written as `java.sql.Timestamp` instants, so the
+  Record Writer decides the representation. `FixedString` loses its trailing NUL padding.
+- `Tuple` → record with element names, `_1`, `_2`, ... when unnamed. `Map` keys become strings (NiFi maps are string-keyed).
+  `JSON`/`Variant`/`Dynamic` → JSON text through jackson-core.
+- No incoming FlowFile and no `SQL Query`: log + yield. This cannot be validated statically; NiFi has no way to tell at
+  validation time whether an upstream connection exists.
+- An empty result still gives one FlowFile with 0 records, so downstream sees a predictable shape.
+
+Things learned:
+- A bare literal like `-170141183460469231731687303715884105728` overflows while the server parses it; the first probe
+  blamed the client for a wrong Int128 read. `toInt128('...')` is the right way to write such constants in tests.
+- Setting a property on an enabled mock controller service throws; disable, set, enable.
+
+Left for later:
+- Query parameters (`{name:Type}`), incremental/state-tracking queries.
+
 ## Phase 2b — RowBinary (2026-09-18)
 
 Done:

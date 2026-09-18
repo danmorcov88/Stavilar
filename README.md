@@ -4,13 +4,13 @@ Native ClickHouse bundle for Apache NiFi 2.x, built on the official ClickHouse J
 
 A *stăvilar* is a sluice gate: it controls how much water flows and when. Here it controls the flow from NiFi into ClickHouse.
 
-**Status: work in progress.** The connection service and `PutClickHouseRecord` (RowBinary and JSONEachRow) work. See [NOTES.md](NOTES.md) for what is done and what comes next.
+**Status: work in progress.** The connection service, `PutClickHouseRecord` and `QueryClickHouseRecord` work. See [NOTES.md](NOTES.md) for what is done and what comes next.
 
 ## Components
 
 - `ClickHouseConnectionService`: a controller service that holds a `client-v2` client (HTTP, LZ4, failover between endpoints). Done.
 - `PutClickHouseRecord`: bulk inserts from any NiFi Record Reader as RowBinary or JSONEachRow, with insert deduplication tokens so retries do not create duplicate rows. Done.
-- `QueryClickHouseRecord`: streams query results into FlowFiles through a Record Writer, without holding the whole result in memory. Planned.
+- `QueryClickHouseRecord`: streams query results into FlowFiles through a Record Writer, without holding the whole result in memory. Done.
 - `ExecuteClickHouseStatement`: runs DDL/DML that returns no rows. Planned.
 
 Why not JDBC: NiFi already has `PutDatabaseRecord` over JDBC. This bundle skips JDBC and streams data in ClickHouse's own formats, passes ClickHouse settings per insert, and deduplicates on retry.
@@ -128,6 +128,41 @@ Not supported by RowBinary in this version: `Map`, `Tuple`, `Nested`, `JSON`, `V
 | byte[] | base64 string |
 | arrays, collections | JSON array |
 | maps, nested records | JSON object |
+
+## QueryClickHouseRecord
+
+Runs a query and writes the rows with any Record Writer (Avro, JSON, CSV, Parquet, ...). The response comes as `RowBinaryWithNamesAndTypes` and is written row by row, so a 100M-row result needs no more heap than a 100-row one.
+
+| Property | Default | Meaning |
+|---|---|---|
+| ClickHouse Connection Service | | the service |
+| SQL Query | | the query, supports Expression Language; empty means the query is the content of the incoming FlowFile |
+| Record Writer | | any NiFi Record Writer |
+| Max Rows Per FlowFile | 0 | 0 = one FlowFile; otherwise the result is split and each FlowFile gets `fragment.identifier`, `fragment.index`, `fragment.count` |
+| `ch.setting.<name>` | | query settings such as `max_execution_time`; overrides the service |
+
+The processor works with or without an incoming FlowFile. Relationships: `success` (result FlowFiles, with `record.count`, `mime.type`, `clickhouse.rows.read`, `clickhouse.query.id`), `failure` (the incoming FlowFile, or a new empty one, with `clickhouse.error`), `original` (the incoming FlowFile after a successful query). An empty result still produces one FlowFile with `record.count = 0`.
+
+Result schema, ClickHouse type → NiFi record type:
+
+| ClickHouse | NiFi |
+|---|---|
+| `Int8`, `Int16`, `Int32`, `UInt8`, `UInt16` | int |
+| `Int64`, `UInt32` | long |
+| `UInt64`, `Int128`, `UInt128`, `Int256`, `UInt256` | bigint |
+| `Float32` / `Float64` | float / double |
+| `Decimal(P, S)` | decimal(P, S) |
+| `String`, `FixedString` (trailing zero bytes removed), `Enum8/16` (the name), `IPv4/IPv6`, `JSON` (as text) | string |
+| `Bool` | boolean |
+| `UUID` | uuid |
+| `Date`, `Date32` | date |
+| `DateTime`, `DateTime64` | timestamp (UTC instant) |
+| `Nullable(T)`, `LowCardinality(T)` | T |
+| `Array(T)` | array of T |
+| `Map(K, V)` | map of V (keys become strings) |
+| `Tuple(...)` | record; unnamed elements are `_1`, `_2`, ... |
+
+Measured in the integration test: 5,000,000 rows (`UInt64, String`) read into 5 Avro FlowFiles of 1,000,000 rows, 73 MB in total, in 2.3 s with a 512 MB heap.
 
 ### Benchmark
 
