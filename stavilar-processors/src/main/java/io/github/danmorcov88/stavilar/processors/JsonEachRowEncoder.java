@@ -67,6 +67,15 @@ final class JsonEachRowEncoder implements RowEncoder {
         generator.flush();
     }
 
+    /** One value as JSON text, for example a Map read from a JSON column. */
+    static String toJson(final Object value) throws IOException {
+        final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        try (JsonEachRowEncoder encoder = new JsonEachRowEncoder(out)) {
+            encoder.writeValue(value);
+        }
+        return out.toString(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
     @Override
     public void close() throws IOException {
         generator.close();
