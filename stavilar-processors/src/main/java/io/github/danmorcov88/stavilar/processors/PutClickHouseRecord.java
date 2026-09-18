@@ -267,18 +267,18 @@ public class PutClickHouseRecord extends AbstractProcessor {
             run.send();
         } catch (final MalformedRecordException | org.apache.nifi.schema.access.SchemaNotFoundException | IOException e) {
             getLogger().error("Could not read records from {}", flowFile, e);
-            session.transfer(session.putAttribute(flowFile, ATTR_ERROR, InsertErrors.message(e)), REL_FAILURE);
+            session.transfer(session.putAttribute(flowFile, ATTR_ERROR, ClickHouseErrors.message(e)), REL_FAILURE);
             return;
         } catch (final RuntimeException e) {
-            if (InsertErrors.isServerError(e)) {
+            if (ClickHouseErrors.isServerError(e)) {
                 // the table may have changed; read its schema again next time
                 schemas.remove(target);
             }
-            final String message = InsertErrors.message(e);
+            final String message = ClickHouseErrors.message(e);
             final Map<String, String> attributes = new HashMap<>();
             attributes.put(ATTR_ERROR, message);
             attributes.put(ATTR_QUERY_ID, run == null ? "" : String.join(",", run.queryIds()));
-            if (InsertErrors.isRetryable(e)) {
+            if (ClickHouseErrors.isRetryable(e)) {
                 getLogger().warn("Insert into {} failed for {}, will retry: {}", target, flowFile, message);
                 session.transfer(session.putAllAttributes(flowFile, attributes), REL_RETRY);
                 context.yield();

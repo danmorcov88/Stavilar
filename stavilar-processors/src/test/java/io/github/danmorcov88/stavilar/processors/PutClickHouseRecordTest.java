@@ -206,18 +206,18 @@ class PutClickHouseRecordTest {
 
     @Test
     void errorClassification() {
-        assertTrue(InsertErrors.isRetryable(new ConnectionInitiationException("refused")));
-        assertTrue(InsertErrors.isRetryable(new CompletionException(new ConnectionInitiationException("refused"))));
-        assertTrue(InsertErrors.isRetryable(new TransportException("reset", null, "q")));
-        assertTrue(InsertErrors.isRetryable(new DataTransferException("broken pipe")));
-        assertFalse(InsertErrors.isRetryable(new ClientMisconfigurationException("bad option")));
-        assertFalse(InsertErrors.isRetryable(new IllegalStateException("other")));
+        assertTrue(ClickHouseErrors.isRetryable(new ConnectionInitiationException("refused")));
+        assertTrue(ClickHouseErrors.isRetryable(new CompletionException(new ConnectionInitiationException("refused"))));
+        assertTrue(ClickHouseErrors.isRetryable(new TransportException("reset", null, "q")));
+        assertTrue(ClickHouseErrors.isRetryable(new DataTransferException("broken pipe")));
+        assertFalse(ClickHouseErrors.isRetryable(new ClientMisconfigurationException("bad option")));
+        assertFalse(ClickHouseErrors.isRetryable(new IllegalStateException("other")));
         // client-v2 marks 252 TOO_MANY_PARTS and 241 MEMORY_LIMIT_EXCEEDED retryable; 60 UNKNOWN_TABLE and 117 INCORRECT_DATA are not
-        assertTrue(InsertErrors.isRetryable(new ServerException(252, "Too many parts", 500, "")));
-        assertTrue(InsertErrors.isRetryable(new ServerException(241, "Memory limit", 500, "")));
-        assertFalse(InsertErrors.isRetryable(new ServerException(60, "Table not found", 404, "")));
-        assertFalse(InsertErrors.isRetryable(new ServerException(117, "Unknown field", 400, "")));
-        assertEquals("Table not found", InsertErrors.message(new CompletionException(new ServerException(60, "Table not found", 404, ""))));
+        assertTrue(ClickHouseErrors.isRetryable(new ServerException(252, "Too many parts", 500, "")));
+        assertTrue(ClickHouseErrors.isRetryable(new ServerException(241, "Memory limit", 500, "")));
+        assertFalse(ClickHouseErrors.isRetryable(new ServerException(60, "Table not found", 404, "")));
+        assertFalse(ClickHouseErrors.isRetryable(new ServerException(117, "Unknown field", 400, "")));
+        assertEquals("Table not found", ClickHouseErrors.message(new CompletionException(new ServerException(60, "Table not found", 404, ""))));
     }
 
     @Test

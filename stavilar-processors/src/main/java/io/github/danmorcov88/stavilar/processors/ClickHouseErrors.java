@@ -9,16 +9,16 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 
 /**
- * Decides whether a failed insert is worth retrying.
+ * Classifies client-v2 failures for routing: retry or failure.
  * <p>
  * client-v2 hierarchy: {@code ClickHouseException} is the base; {@code ServerException} carries the
  * server's error code and its own retryable flag; {@code ConnectionInitiationException},
  * {@code TransportException} and {@code DataTransferException} are network problems;
  * {@code ClientException} covers client-side problems such as bad options.
  */
-final class InsertErrors {
+final class ClickHouseErrors {
 
-    private InsertErrors() {
+    private ClickHouseErrors() {
     }
 
     /** Unwraps the future wrappers client-v2 may put around the real cause. */
