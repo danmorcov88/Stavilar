@@ -1,7 +1,7 @@
 package io.github.danmorcov88.stavilar.processors;
 
-import com.clickhouse.client.api.metadata.TableSchema;
 import com.clickhouse.data.ClickHouseColumn;
+import io.github.danmorcov88.stavilar.processors.TableColumns.TableColumn;
 import org.apache.nifi.serialization.SimpleRecordSchema;
 import org.apache.nifi.serialization.record.MapRecord;
 import org.apache.nifi.serialization.record.RecordField;
@@ -33,6 +33,7 @@ import java.util.UUID;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -195,7 +196,8 @@ class RowBinaryEncoderTest {
 
     @Test
     void writesWholeRecordsInColumnOrder() throws IOException {
-        final TableSchema table = new TableSchema(ClickHouseColumn.parse("id UInt32, name String, flag Nullable(Bool)"));
+        final List<TableColumn> table = ClickHouseColumn.parse("id UInt32, name String, flag Nullable(Bool)").stream()
+                .map(c -> new TableColumn(c, true)).toList();
         final Map<String, Object> values = new LinkedHashMap<>();
         values.put("name", "ab");
         values.put("id", 7);
@@ -212,6 +214,48 @@ class RowBinaryEncoderTest {
             assertEquals(2, encoder.getRowCount());
         }
         assertEquals("07000000026162" + "07000000026162", HexFormat.of().formatHex(out.toByteArray()));
+    }
+
+    @Test
+    void mappingRejectsComputedColumnsAndUnknownFields() {
+        final List<TableColumn> table = List.of(
+                new TableColumn(ClickHouseColumn.of("id", "UInt32"), true),
+                new TableColumn(ClickHouseColumn.of("doubled", "UInt64"), false),
+                new TableColumn(ClickHouseColumn.of("tags", "Map(String, String)"), true));
+        final SimpleRecordSchema idAndDoubled = new SimpleRecordSchema(List.of(
+                new RecordField("id", RecordFieldType.INT.getDataType()),
+                new RecordField("doubled", RecordFieldType.LONG.getDataType())));
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> ColumnMapping.forRecordSchema(idAndDoubled, table, "t"))
+                .getMessage().contains("ALIAS or MATERIALIZED"));
+
+        final SimpleRecordSchema idAndNope = new SimpleRecordSchema(List.of(
+                new RecordField("id", RecordFieldType.INT.getDataType()),
+                new RecordField("nope", RecordFieldType.STRING.getDataType())));
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> ColumnMapping.forRecordSchema(idAndNope, table, "t"))
+                .getMessage().contains("[nope]"));
+
+        final SimpleRecordSchema idAndTags = new SimpleRecordSchema(List.of(
+                new RecordField("id", RecordFieldType.INT.getDataType()),
+                new RecordField("tags", RecordFieldType.MAP.getDataType())));
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> ColumnMapping.forRecordSchema(idAndTags, table, "t"))
+                .getMessage().contains("Insert Format = JSONEachRow"));
+
+        assertEquals("t", TableColumns.unquote("`t`"));
+        assertEquals("t", TableColumns.unquote(" t "));
+    }
+
+    @Test
+    void fastIsoParserAgreesWithJavaTime() {
+        for (final String text : List.of("2024-03-15T11:45:10Z", "2024-03-15 11:45:10Z", "2024-03-15T11:45:10.123Z", "2024-03-15T11:45:10.123456789Z",
+                "2024-03-15T14:45:10+03:00", "2024-03-15T06:45:10-05:00", "1969-12-31T23:59:59.5Z", "2000-02-29T00:00:00Z", "1900-03-01T00:00:00Z")) {
+            final Instant expected = OffsetDateTime.parse(text.replace(' ', 'T')).toInstant();
+            assertEquals(expected, RowBinaryEncoder.parseIsoInstant(text, BUCHAREST), text);
+        }
+        assertEquals(LocalDateTime.of(2024, 3, 15, 13, 45, 10).atZone(BUCHAREST).toInstant(),
+                RowBinaryEncoder.parseIsoInstant("2024-03-15 13:45:10", BUCHAREST));
+        for (final String bad : List.of("2024-03-15", "2024-13-15T11:45:10Z", "2024-03-15T11:45:10.Z", "2024-03-15T11:45:10+0300", "15/03/2024 11:45:10")) {
+            assertNull(RowBinaryEncoder.parseIsoInstant(bad, BUCHAREST), bad);
+        }
     }
 
     @Test

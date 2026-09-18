@@ -14,6 +14,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
@@ -40,6 +42,9 @@ import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.ATTR
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.CONNECTION_SERVICE;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.DEDUPLICATION_TOKEN;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.DEDUPLICATION_TOKEN_ATTRIBUTE;
+import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.FORMAT_JSON_EACH_ROW;
+import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.FORMAT_ROW_BINARY;
+import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.INSERT_FORMAT;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.MAX_ROWS_PER_INSERT;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.RECORD_READER;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.REL_FAILURE;
@@ -84,6 +89,10 @@ class PutClickHouseRecordIT {
         execute("CREATE TABLE dedup (id UInt32, name String) ENGINE = MergeTree ORDER BY id "
                 + "SETTINGS non_replicated_deduplication_window = 100");
         execute("CREATE TABLE plain (id UInt32, name String) ENGINE = MergeTree ORDER BY id");
+        execute("CREATE TABLE defaults (id UInt32, name String DEFAULT 'none', created DateTime DEFAULT now(), score Nullable(Float64)) "
+                + "ENGINE = MergeTree ORDER BY id");
+        execute("CREATE TABLE evolving (id UInt32) ENGINE = MergeTree ORDER BY id");
+        execute("CREATE TABLE with_map (id UInt32, tags Map(String, String)) ENGINE = MergeTree ORDER BY id");
         execute("CREATE TABLE types ("
                 + "i8 Int8, i64 Int64, u64 UInt64, f32 Float32, f64 Float64, dec Decimal(12, 3), "
                 + "s String, fs FixedString(3), b Bool, u UUID, "
@@ -118,11 +127,14 @@ class PutClickHouseRecordIT {
         runner.setProperty(CONNECTION_SERVICE, "clickhouse");
     }
 
-    @Test
-    void insertsOneMillionRowsInBatches() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {FORMAT_ROW_BINARY, FORMAT_JSON_EACH_ROW})
+    void insertsOneMillionRowsInBatches(final String format) throws Exception {
+        execute("TRUNCATE TABLE big");
         useCsvReader();
         runner.enableControllerService(service);
         runner.setProperty(TABLE, "big");
+        runner.setProperty(INSERT_FORMAT, format);
         runner.enqueue(bigCsv);
 
         final long start = System.nanoTime();
@@ -141,7 +153,7 @@ class PutClickHouseRecordIT {
         assertEquals("7.25", scalar("SELECT toString(amount) FROM big WHERE id = 7"));
         assertEquals("10", scalar("SELECT count() FROM system.query_log WHERE type = 'QueryFinish' AND query_id IN ("
                 + quotedList(out.getAttribute(ATTR_QUERY_ID)) + ")"));
-        System.out.println("1M rows inserted in " + millis + " ms");
+        System.out.println("1M rows inserted as " + format + " in " + millis + " ms");
     }
 
     @Test
@@ -205,8 +217,10 @@ class PutClickHouseRecordIT {
         assertEquals("5", scalar("SELECT count() FROM dedup WHERE name LIKE 'n%'"));
     }
 
-    @Test
-    void unknownColumnGoesToFailureWithServerMessage() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {FORMAT_ROW_BINARY, FORMAT_JSON_EACH_ROW})
+    void unknownColumnGoesToFailureWithServerMessage(final String format) throws Exception {
+        runner.setProperty(INSERT_FORMAT, format);
         final MockRecordParser reader = new MockRecordParser();
         reader.addSchemaField("id", RecordFieldType.INT);
         reader.addSchemaField("nope", RecordFieldType.STRING);
@@ -225,8 +239,10 @@ class PutClickHouseRecordIT {
         assertEquals(0, count("plain"));
     }
 
-    @Test
-    void unknownTableGoesToFailure() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {FORMAT_ROW_BINARY, FORMAT_JSON_EACH_ROW})
+    void unknownTableGoesToFailure(final String format) throws Exception {
+        runner.setProperty(INSERT_FORMAT, format);
         useMockReader().addRecord(1, "x");
         runner.enableControllerService(service);
         runner.setProperty(TABLE, "does_not_exist");
@@ -276,8 +292,11 @@ class PutClickHouseRecordIT {
         assertEquals("0", row.getString("a"), "async_insert=0 is sent explicitly");
     }
 
-    @Test
-    void allTypesRoundTrip() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {FORMAT_ROW_BINARY, FORMAT_JSON_EACH_ROW})
+    void allTypesRoundTrip(final String format) throws Exception {
+        execute("TRUNCATE TABLE types");
+        runner.setProperty(INSERT_FORMAT, format);
         final MockRecordParser reader = new MockRecordParser();
         reader.addSchemaField("i8", RecordFieldType.BYTE);
         reader.addSchemaField("i64", RecordFieldType.LONG);
@@ -335,6 +354,84 @@ class PutClickHouseRecordIT {
         assertNull(row.getString("n"));
         assertEquals("low", row.getString("lc"));
         assertEquals("[1,2,3]", row.getString("arr"));
+    }
+
+    @Test
+    void rowBinaryLeavesMissingColumnsToTheirDefaults() throws Exception {
+        final MockRecordParser reader = new MockRecordParser();
+        reader.addSchemaField("id", RecordFieldType.INT);
+        reader.addSchemaField("score", RecordFieldType.DOUBLE);
+        reader.addRecord(1, 2.5);
+        reader.addRecord(2, null);
+        runner.addControllerService("reader", reader);
+        runner.enableControllerService(reader);
+        runner.setProperty(RECORD_READER, "reader");
+        runner.enableControllerService(service);
+        runner.setProperty(TABLE, "defaults");
+
+        runner.enqueue("x");
+        runner.run();
+        runner.assertAllFlowFilesTransferred(REL_SUCCESS, 1);
+        final List<GenericRecord> rows = admin.queryAll("SELECT id, name, created > now() - 60 AS recent, toString(score) AS score FROM defaults ORDER BY id");
+        assertEquals(2, rows.size());
+        assertEquals("none", rows.get(0).getString("name"));
+        assertEquals("1", rows.get(0).getString("recent"));
+        assertEquals("2.5", rows.get(0).getString("score"));
+        assertNull(rows.get(1).getString("score"));
+    }
+
+    @Test
+    void rowBinaryReadsSchemaAgainAfterAlterTable() throws Exception {
+        useMockReader().addRecord(1, "ignored");
+        // first FlowFile: only 'id' exists; cache the schema with a reader that has just 'id'
+        final MockRecordParser idOnly = new MockRecordParser();
+        idOnly.addSchemaField("id", RecordFieldType.INT);
+        idOnly.addRecord(1);
+        runner.addControllerService("idOnly", idOnly);
+        runner.enableControllerService(idOnly);
+        runner.setProperty(RECORD_READER, "idOnly");
+        runner.enableControllerService(service);
+        runner.setProperty(TABLE, "evolving");
+        runner.enqueue("x");
+        runner.run();
+        runner.assertAllFlowFilesTransferred(REL_SUCCESS, 1);
+        runner.clearTransferState();
+
+        execute("ALTER TABLE evolving ADD COLUMN name String");
+
+        // second FlowFile has the new column; the stale cache must be refreshed without a restart
+        runner.setProperty(RECORD_READER, "reader");
+        runner.enqueue("x");
+        runner.run();
+        runner.assertAllFlowFilesTransferred(REL_SUCCESS, 1);
+        assertEquals("ignored", scalar("SELECT name FROM evolving WHERE name != '' LIMIT 1"));
+    }
+
+    @Test
+    void rowBinaryRejectsUnsupportedColumnTypeWithHint() throws Exception {
+        final MockRecordParser reader = new MockRecordParser();
+        reader.addSchemaField("id", RecordFieldType.INT);
+        reader.addSchemaField("tags", RecordFieldType.MAP);
+        reader.addRecord(1, Map.of("k", "v"));
+        runner.addControllerService("reader", reader);
+        runner.enableControllerService(reader);
+        runner.setProperty(RECORD_READER, "reader");
+        runner.enableControllerService(service);
+        runner.setProperty(TABLE, "with_map");
+
+        runner.enqueue("x");
+        runner.run();
+        runner.assertAllFlowFilesTransferred(REL_FAILURE, 1);
+        final String error = runner.getFlowFilesForRelationship(REL_FAILURE).get(0).getAttribute(ATTR_ERROR);
+        assertTrue(error.contains("Map(String, String)") && error.contains("JSONEachRow"), error);
+
+        // the same records go through with JSONEachRow
+        runner.clearTransferState();
+        runner.setProperty(INSERT_FORMAT, FORMAT_JSON_EACH_ROW);
+        runner.enqueue("x");
+        runner.run();
+        runner.assertAllFlowFilesTransferred(REL_SUCCESS, 1);
+        assertEquals("v", scalar("SELECT tags['k'] FROM with_map"));
     }
 
     private void useCsvReader() throws InitializationException {

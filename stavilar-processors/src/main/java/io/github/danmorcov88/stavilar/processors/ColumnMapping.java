@@ -1,8 +1,8 @@
 package io.github.danmorcov88.stavilar.processors;
 
-import com.clickhouse.client.api.metadata.TableSchema;
 import com.clickhouse.data.ClickHouseColumn;
 import com.clickhouse.data.ClickHouseDataType;
+import io.github.danmorcov88.stavilar.processors.TableColumns.TableColumn;
 import org.apache.nifi.serialization.record.RecordSchema;
 
 import java.util.ArrayList;
@@ -34,15 +34,20 @@ final class ColumnMapping {
     }
 
     /**
-     * @throws IllegalArgumentException for a record field without a column, or a column of an unsupported type
+     * @throws IllegalArgumentException for a record field without a column, a field matching an ALIAS or
+     *                                  MATERIALIZED column, or a column of an unsupported type
      */
-    static List<ClickHouseColumn> forRecordSchema(final RecordSchema recordSchema, final TableSchema table, final String tableName) {
+    static List<ClickHouseColumn> forRecordSchema(final RecordSchema recordSchema, final List<TableColumn> table, final String tableName) {
         final Set<String> fields = new HashSet<>(recordSchema.getFieldNames());
         final List<ClickHouseColumn> columns = new ArrayList<>();
-        for (final ClickHouseColumn column : table.getColumns()) {
-            if (fields.remove(column.getColumnName())) {
-                checkSupported(column);
-                columns.add(column);
+        for (final TableColumn tableColumn : table) {
+            if (fields.remove(tableColumn.name())) {
+                if (!tableColumn.insertable()) {
+                    throw new IllegalArgumentException("column '" + tableColumn.name() + "' of table " + tableName
+                            + " is ALIAS or MATERIALIZED and cannot be inserted into; remove the field from the records");
+                }
+                checkSupported(tableColumn.column());
+                columns.add(tableColumn.column());
             }
         }
         if (!fields.isEmpty()) {

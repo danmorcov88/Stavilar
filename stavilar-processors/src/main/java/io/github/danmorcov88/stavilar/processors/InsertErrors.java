@@ -31,21 +31,43 @@ final class InsertErrors {
 
     /**
      * @return true for network problems and server errors ClickHouse marks as retryable
-     * (too many parts, memory limit, timeouts); false for data, schema and client configuration errors
+     * (too many parts, memory limit, timeouts); false for data, schema and client configuration errors.
+     * The whole cause chain is inspected: client-v2 wraps a transport failure in a generic
+     * {@code ClientException("Failed to get query response")} on some paths.
      */
     static boolean isRetryable(final Throwable t) {
-        final Throwable cause = unwrap(t);
-        if (cause instanceof ServerException server) {
-            return server.isRetryable();
+        for (Throwable cause = unwrap(t); cause != null; cause = cause.getCause()) {
+            if (cause instanceof ServerException server) {
+                return server.isRetryable();
+            }
+            if (cause instanceof ConnectionInitiationException || cause instanceof TransportException || cause instanceof DataTransferException) {
+                return true;
+            }
         }
-        return cause instanceof ConnectionInitiationException
-                || cause instanceof TransportException
-                || cause instanceof DataTransferException;
+        return false;
     }
 
+    /** @return true when ClickHouse itself answered with an error (as opposed to a client or network problem) */
+    static boolean isServerError(final Throwable t) {
+        for (Throwable cause = unwrap(t); cause != null; cause = cause.getCause()) {
+            if (cause instanceof ServerException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The message of the unwrapped exception, plus the root cause's message when that adds something. */
     static String message(final Throwable t) {
         final Throwable cause = unwrap(t);
-        final String message = cause.getMessage();
-        return message == null ? cause.getClass().getSimpleName() : message;
+        final String message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+        Throwable root = cause;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        if (root != cause && root.getMessage() != null && !message.contains(root.getMessage())) {
+            return message + ": " + root.getMessage();
+        }
+        return message;
     }
 }

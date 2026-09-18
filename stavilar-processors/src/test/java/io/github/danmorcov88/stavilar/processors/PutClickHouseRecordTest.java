@@ -13,6 +13,8 @@ import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -26,6 +28,9 @@ import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.CONN
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.DATABASE;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.DEDUPLICATION_TOKEN;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.DEDUPLICATION_TOKEN_ATTRIBUTE;
+import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.FORMAT_JSON_EACH_ROW;
+import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.FORMAT_ROW_BINARY;
+import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.INSERT_FORMAT;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.RECORD_READER;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.REL_FAILURE;
 import static io.github.danmorcov88.stavilar.processors.PutClickHouseRecord.REL_RETRY;
@@ -111,7 +116,14 @@ class PutClickHouseRecordTest {
     }
 
     @Test
-    void insertSettingsDefaults() {
+    void insertSettingsDefaultsRowBinary() {
+        final Map<String, String> settings = PutClickHouseRecord.insertSettings(runner.getProcessContext(), new MockFlowFile(1));
+        assertEquals(Map.of("async_insert", "0", "wait_end_of_query", "1"), settings);
+    }
+
+    @Test
+    void insertSettingsDefaultsJson() {
+        runner.setProperty(INSERT_FORMAT, FORMAT_JSON_EACH_ROW);
         final Map<String, String> settings = PutClickHouseRecord.insertSettings(runner.getProcessContext(), new MockFlowFile(1));
         assertEquals("best_effort", settings.get("date_time_input_format"));
         assertEquals("0", settings.get("input_format_skip_unknown_fields"));
@@ -121,7 +133,15 @@ class PutClickHouseRecordTest {
     }
 
     @Test
+    void insertFormatDefaultsToRowBinary() {
+        assertEquals(FORMAT_ROW_BINARY, runner.getProcessContext().getProperty(INSERT_FORMAT).getValue());
+        runner.setProperty(INSERT_FORMAT, "CSV");
+        runner.assertNotValid();
+    }
+
+    @Test
     void insertSettingsAsyncAndOverrides() {
+        runner.setProperty(INSERT_FORMAT, FORMAT_JSON_EACH_ROW);
         runner.setProperty(ASYNC_INSERT, "true");
         runner.setProperty(WAIT_END_OF_QUERY, "false");
         runner.setProperty("ch.setting.date_time_input_format", "basic");
@@ -148,15 +168,17 @@ class PutClickHouseRecordTest {
         out.assertAttributeEquals(ATTR_INSERTS, "0");
     }
 
-    @Test
-    void connectionRefusedGoesToRetry() {
+    @ParameterizedTest
+    @ValueSource(strings = {FORMAT_ROW_BINARY, FORMAT_JSON_EACH_ROW})
+    void connectionRefusedGoesToRetry(final String format) {
+        runner.setProperty(INSERT_FORMAT, format);
         reader.addRecord(1, "a");
         runner.enqueue("x");
         runner.run();
 
         runner.assertAllFlowFilesTransferred(REL_RETRY, 1);
         final MockFlowFile out = runner.getFlowFilesForRelationship(REL_RETRY).get(0);
-        assertFalse(out.getAttribute(ATTR_ERROR).isBlank());
+        assertTrue(out.getAttribute(ATTR_ERROR).contains("Connection refused"), out.getAttribute(ATTR_ERROR));
     }
 
     @Test

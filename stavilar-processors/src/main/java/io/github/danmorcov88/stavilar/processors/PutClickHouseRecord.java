@@ -3,6 +3,8 @@ package io.github.danmorcov88.stavilar.processors;
 import com.clickhouse.client.api.Client;
 import com.clickhouse.client.api.insert.InsertResponse;
 import com.clickhouse.client.api.insert.InsertSettings;
+import com.clickhouse.data.ClickHouseColumn;
+import io.github.danmorcov88.stavilar.processors.TableColumns.TableColumn;
 import com.clickhouse.data.ClickHouseFormat;
 import io.github.danmorcov88.stavilar.api.ClickHouseConnectionService;
 import io.github.danmorcov88.stavilar.api.ClickHouseSettings;
@@ -12,6 +14,7 @@ import org.apache.nifi.annotation.behavior.WritesAttribute;
 import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
@@ -27,11 +30,13 @@ import org.apache.nifi.serialization.MalformedRecordException;
 import org.apache.nifi.serialization.RecordReader;
 import org.apache.nifi.serialization.RecordReaderFactory;
 import org.apache.nifi.serialization.record.Record;
+import org.apache.nifi.serialization.record.RecordSchema;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -39,9 +44,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Supplier;
 
 @Tags({"clickhouse", "insert", "put", "record", "database"})
-@CapabilityDescription("Inserts records into a ClickHouse table as JSONEachRow through the ClickHouse HTTP interface. "
+@CapabilityDescription("Inserts records into a ClickHouse table as RowBinary or JSONEachRow through the ClickHouse HTTP interface. "
         + "Large FlowFiles are sent in several inserts of at most 'Max Rows Per Insert' rows. "
         + "With a deduplication token, sending the same FlowFile again does not duplicate rows "
         + "on tables that keep a deduplication window.")
@@ -62,6 +70,9 @@ public class PutClickHouseRecord extends AbstractProcessor {
     static final String ATTR_INSERTS = "clickhouse.inserts";
     static final String ATTR_QUERY_ID = "clickhouse.query.id";
     static final String ATTR_ERROR = "clickhouse.error";
+
+    static final String FORMAT_ROW_BINARY = "RowBinary";
+    static final String FORMAT_JSON_EACH_ROW = "JSONEachRow";
 
     static final String TOKEN_NONE = "None";
     static final String TOKEN_FLOWFILE_UUID = "FlowFile UUID";
@@ -94,6 +105,17 @@ public class PutClickHouseRecord extends AbstractProcessor {
             .required(true)
             .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
             .expressionLanguageSupported(ExpressionLanguageScope.FLOWFILE_ATTRIBUTES)
+            .build();
+
+    public static final PropertyDescriptor INSERT_FORMAT = new PropertyDescriptor.Builder()
+            .name("Insert Format")
+            .description("RowBinary encodes values in binary using the table schema (read once per table and cached): "
+                    + "less data on the wire, exact values, columns missing from the records get their DEFAULT. "
+                    + "JSONEachRow sends text and lets the server parse it; use it for column types RowBinary does not support "
+                    + "(Map, Tuple, Nested, JSON, IP addresses).")
+            .required(true)
+            .allowableValues(FORMAT_ROW_BINARY, FORMAT_JSON_EACH_ROW)
+            .defaultValue(FORMAT_ROW_BINARY)
             .build();
 
     public static final PropertyDescriptor MAX_ROWS_PER_INSERT = new PropertyDescriptor.Builder()
@@ -157,10 +179,18 @@ public class PutClickHouseRecord extends AbstractProcessor {
             .build();
 
     private static final List<PropertyDescriptor> PROPERTIES = List.of(
-            CONNECTION_SERVICE, RECORD_READER, DATABASE, TABLE, MAX_ROWS_PER_INSERT,
+            CONNECTION_SERVICE, RECORD_READER, DATABASE, TABLE, INSERT_FORMAT, MAX_ROWS_PER_INSERT,
             DEDUPLICATION_TOKEN, DEDUPLICATION_TOKEN_ATTRIBUTE, ASYNC_INSERT, WAIT_END_OF_QUERY);
 
     private static final Set<Relationship> RELATIONSHIPS = Set.of(REL_SUCCESS, REL_FAILURE, REL_RETRY);
+
+    /** Table columns by target name, for RowBinary. An entry is dropped after any server error on that table. */
+    private final ConcurrentMap<String, List<TableColumn>> schemas = new ConcurrentHashMap<>();
+
+    @OnStopped
+    public void clearSchemaCache() {
+        schemas.clear();
+    }
 
     @Override
     protected List<PropertyDescriptor> getSupportedPropertyDescriptors() {
@@ -201,7 +231,10 @@ public class PutClickHouseRecord extends AbstractProcessor {
 
         final ClickHouseConnectionService service = context.getProperty(CONNECTION_SERVICE).asControllerService(ClickHouseConnectionService.class);
         final RecordReaderFactory readerFactory = context.getProperty(RECORD_READER).asControllerService(RecordReaderFactory.class);
+        final String table = context.getProperty(TABLE).evaluateAttributeExpressions(flowFile).getValue();
+        final String database = database(context, flowFile, service);
         final String target = targetTable(context, flowFile);
+        final boolean rowBinary = FORMAT_ROW_BINARY.equals(context.getProperty(INSERT_FORMAT).getValue());
         final int maxRows = context.getProperty(MAX_ROWS_PER_INSERT).asInteger();
         final Map<String, String> settings = insertSettings(context, flowFile);
 
@@ -215,9 +248,15 @@ public class PutClickHouseRecord extends AbstractProcessor {
         }
 
         final Client client = service.getClient();
-        final InsertRun run = new InsertRun(client, target, settings, token);
+        InsertRun run = null;
         try (InputStream in = session.read(flowFile);
              RecordReader reader = readerFactory.createRecordReader(flowFile, in, getLogger())) {
+            // resolved on the first record, so an empty FlowFile makes no request at all
+            final RecordSchema recordSchema = reader.getSchema();
+            final Supplier<Encoding> encoding = rowBinary
+                    ? () -> rowBinaryEncoding(client, database, table, target, recordSchema)
+                    : () -> new Encoding(ClickHouseFormat.JSONEachRow, null, JsonEachRowEncoder::new);
+            run = new InsertRun(client, target, settings, token, encoding);
             Record record;
             while ((record = reader.nextRecord()) != null) {
                 run.add(record);
@@ -231,10 +270,14 @@ public class PutClickHouseRecord extends AbstractProcessor {
             session.transfer(session.putAttribute(flowFile, ATTR_ERROR, InsertErrors.message(e)), REL_FAILURE);
             return;
         } catch (final RuntimeException e) {
+            if (InsertErrors.isServerError(e)) {
+                // the table may have changed; read its schema again next time
+                schemas.remove(target);
+            }
             final String message = InsertErrors.message(e);
             final Map<String, String> attributes = new HashMap<>();
             attributes.put(ATTR_ERROR, message);
-            attributes.put(ATTR_QUERY_ID, String.join(",", run.queryIds()));
+            attributes.put(ATTR_QUERY_ID, run == null ? "" : String.join(",", run.queryIds()));
             if (InsertErrors.isRetryable(e)) {
                 getLogger().warn("Insert into {} failed for {}, will retry: {}", target, flowFile, message);
                 session.transfer(session.putAllAttributes(flowFile, attributes), REL_RETRY);
@@ -255,6 +298,29 @@ public class PutClickHouseRecord extends AbstractProcessor {
         session.transfer(flowFile, REL_SUCCESS);
     }
 
+    private Encoding rowBinaryEncoding(final Client client, final String database, final String table, final String target,
+                                       final RecordSchema recordSchema) {
+        final List<ClickHouseColumn> columns = mapColumns(client, database, table, target, recordSchema);
+        final List<String> names = columns.stream().map(ClickHouseColumn::getColumnName).toList();
+        return new Encoding(ClickHouseFormat.RowBinary, names, out -> new RowBinaryEncoder(out, columns));
+    }
+
+    private List<ClickHouseColumn> mapColumns(final Client client, final String database, final String table, final String target,
+                                              final RecordSchema recordSchema) {
+        try {
+            return ColumnMapping.forRecordSchema(recordSchema, schemas.computeIfAbsent(target, key -> TableColumns.load(client, database, table)), target);
+        } catch (final IllegalArgumentException e) {
+            // the cached schema may be stale (ALTER TABLE ADD COLUMN); read it again once before giving up
+            schemas.remove(target);
+            return ColumnMapping.forRecordSchema(recordSchema, schemas.computeIfAbsent(target, key -> TableColumns.load(client, database, table)), target);
+        }
+    }
+
+    static String database(final ProcessContext context, final FlowFile flowFile, final ClickHouseConnectionService service) {
+        final String database = context.getProperty(DATABASE).evaluateAttributeExpressions(flowFile).getValue();
+        return database == null || database.isBlank() ? service.getDatabase() : database;
+    }
+
     static String targetTable(final ProcessContext context, final FlowFile flowFile) {
         final String table = context.getProperty(TABLE).evaluateAttributeExpressions(flowFile).getValue();
         final String database = context.getProperty(DATABASE).evaluateAttributeExpressions(flowFile).getValue();
@@ -264,9 +330,11 @@ public class PutClickHouseRecord extends AbstractProcessor {
     /** Server settings for one FlowFile: processor defaults first, then the dynamic properties on top. */
     static Map<String, String> insertSettings(final ProcessContext context, final FlowFile flowFile) {
         final Map<String, String> settings = new java.util.LinkedHashMap<>();
-        settings.put("date_time_input_format", "best_effort");
-        // ClickHouse drops unknown JSON fields by default; a record field without a column is a failure here, not silent loss.
-        settings.put("input_format_skip_unknown_fields", "0");
+        if (FORMAT_JSON_EACH_ROW.equals(context.getProperty(INSERT_FORMAT).getValue())) {
+            settings.put("date_time_input_format", "best_effort");
+            // ClickHouse drops unknown JSON fields by default; a record field without a column is a failure here, not silent loss.
+            settings.put("input_format_skip_unknown_fields", "0");
+        }
         if (context.getProperty(ASYNC_INSERT).asBoolean()) {
             settings.put("async_insert", "1");
             settings.put("wait_for_async_insert", "1");
@@ -305,27 +373,43 @@ public class PutClickHouseRecord extends AbstractProcessor {
         return index == 0 ? base : base + "-" + index;
     }
 
-    /** Buffers records into JSONEachRow batches and sends them one insert at a time. */
+    /** How one FlowFile is encoded: the wire format, the insert column list (null = all columns) and the encoder per batch. */
+    private record Encoding(ClickHouseFormat format, List<String> columns, EncoderFactory encoderFactory) {
+    }
+
+    @FunctionalInterface
+    private interface EncoderFactory {
+        RowEncoder create(OutputStream out) throws IOException;
+    }
+
+    /** Buffers records into batches and sends them one insert at a time. */
     private static final class InsertRun {
         private final Client client;
         private final String target;
         private final Map<String, String> settings;
         private final String token;
+        private final Supplier<Encoding> encodingSupplier;
+        private Encoding encoding;
         private final List<String> queryIds = new ArrayList<>();
         private ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        private JsonEachRowEncoder encoder;
+        private RowEncoder encoder;
         private long rowsWritten;
 
-        InsertRun(final Client client, final String target, final Map<String, String> settings, final String token) {
+        InsertRun(final Client client, final String target, final Map<String, String> settings, final String token,
+                  final Supplier<Encoding> encodingSupplier) {
             this.client = client;
             this.target = target;
             this.settings = settings;
             this.token = token;
+            this.encodingSupplier = encodingSupplier;
         }
 
         void add(final Record record) throws IOException {
             if (encoder == null) {
-                encoder = new JsonEachRowEncoder(buffer);
+                if (encoding == null) {
+                    encoding = encodingSupplier.get();
+                }
+                encoder = encoding.encoderFactory().create(buffer);
             }
             encoder.write(record);
         }
@@ -352,7 +436,11 @@ public class PutClickHouseRecord extends AbstractProcessor {
             }
             queryIds.add(queryId);
 
-            try (InsertResponse response = client.insert(target, new ByteArrayInputStream(body), ClickHouseFormat.JSONEachRow, insertSettings).join()) {
+            final InputStream in = new ByteArrayInputStream(body);
+            final InsertResponse response = encoding.columns() == null
+                    ? client.insert(target, in, encoding.format(), insertSettings).join()
+                    : client.insert(target, encoding.columns(), in, encoding.format(), insertSettings).join();
+            try (response) {
                 rowsWritten += response.getWrittenRows();
             }
         }

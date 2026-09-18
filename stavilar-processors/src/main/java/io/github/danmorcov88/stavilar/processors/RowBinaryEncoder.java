@@ -5,7 +5,6 @@ import com.clickhouse.data.ClickHouseDataType;
 import com.clickhouse.data.ClickHouseEnum;
 import org.apache.nifi.serialization.record.Record;
 
-import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.reflect.Array;
@@ -38,7 +37,7 @@ final class RowBinaryEncoder implements RowEncoder {
     private static final long[] POW10 = {1L, 10L, 100L, 1_000L, 10_000L, 100_000L, 1_000_000L, 10_000_000L, 100_000_000L, 1_000_000_000L};
     private static final BigInteger UINT64_MAX = BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE);
 
-    private final OutputStream out;
+    private final Sink out;
     private final List<ClickHouseColumn> columns;
     private final ZoneId localZone;
     private long rows;
@@ -48,7 +47,7 @@ final class RowBinaryEncoder implements RowEncoder {
     }
 
     RowBinaryEncoder(final OutputStream out, final List<ClickHouseColumn> columns, final ZoneId localZone) {
-        this.out = out instanceof BufferedOutputStream ? out : new BufferedOutputStream(out, 64 * 1024);
+        this.out = new Sink(out);
         this.columns = columns;
         this.localZone = localZone;
     }
@@ -69,6 +68,61 @@ final class RowBinaryEncoder implements RowEncoder {
     @Override
     public void close() throws IOException {
         out.close();
+    }
+
+    /**
+     * Small write buffer without the per-call synchronization of BufferedOutputStream
+     * and ByteArrayOutputStream; the encoder writes a lot of single bytes.
+     */
+    private static final class Sink extends OutputStream {
+        private final OutputStream target;
+        private final byte[] buffer = new byte[64 * 1024];
+        private int position;
+
+        Sink(final OutputStream target) {
+            this.target = target;
+        }
+
+        @Override
+        public void write(final int b) throws IOException {
+            if (position == buffer.length) {
+                flushBuffer();
+            }
+            buffer[position++] = (byte) b;
+        }
+
+        @Override
+        public void write(final byte[] bytes, final int offset, final int length) throws IOException {
+            if (length >= buffer.length) {
+                flushBuffer();
+                target.write(bytes, offset, length);
+                return;
+            }
+            if (length > buffer.length - position) {
+                flushBuffer();
+            }
+            System.arraycopy(bytes, offset, buffer, position, length);
+            position += length;
+        }
+
+        private void flushBuffer() throws IOException {
+            if (position > 0) {
+                target.write(buffer, 0, position);
+                position = 0;
+            }
+        }
+
+        @Override
+        public void flush() throws IOException {
+            flushBuffer();
+            target.flush();
+        }
+
+        @Override
+        public void close() throws IOException {
+            flushBuffer();
+            target.close();
+        }
     }
 
     /**
@@ -102,7 +156,7 @@ final class RowBinaryEncoder implements RowEncoder {
             case Int32 -> writeIntLE(out, (int) toLong(value, Integer.MIN_VALUE, Integer.MAX_VALUE));
             case UInt32 -> writeIntLE(out, (int) toLong(value, 0, 4294967295L));
             case Int64 -> writeLongLE(out, toLong(value, Long.MIN_VALUE, Long.MAX_VALUE));
-            case UInt64 -> writeBigIntegerLE(out, toBigInteger(value), 8, BigInteger.ZERO, UINT64_MAX);
+            case UInt64 -> writeUInt64(out, value);
             case Int128 -> writeBigIntegerLE(out, toBigInteger(value), 16, BigInteger.ONE.shiftLeft(127).negate(), BigInteger.ONE.shiftLeft(127).subtract(BigInteger.ONE));
             case UInt128 -> writeBigIntegerLE(out, toBigInteger(value), 16, BigInteger.ZERO, BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE));
             case Int256 -> writeBigIntegerLE(out, toBigInteger(value), 32, BigInteger.ONE.shiftLeft(255).negate(), BigInteger.ONE.shiftLeft(255).subtract(BigInteger.ONE));
@@ -147,7 +201,7 @@ final class RowBinaryEncoder implements RowEncoder {
         } else if (value instanceof Boolean b) {
             v = b ? 1 : 0;
         } else if (value instanceof CharSequence s) {
-            v = new BigDecimal(s.toString().trim()).toBigIntegerExact().longValueExact();
+            v = parseLong(s.toString().trim());
         } else {
             throw new IllegalArgumentException("cannot convert to an integer");
         }
@@ -181,9 +235,19 @@ final class RowBinaryEncoder implements RowEncoder {
             return b ? BigInteger.ONE : BigInteger.ZERO;
         }
         if (value instanceof CharSequence s) {
-            return new BigDecimal(s.toString().trim()).toBigIntegerExact();
+            final String text = s.toString().trim();
+            return text.length() <= 18 ? BigInteger.valueOf(parseLong(text)) : new BigDecimal(text).toBigIntegerExact();
         }
         throw new IllegalArgumentException("cannot convert to an integer");
+    }
+
+    /** Plain digits go through Long.parseLong; anything else ("1.0", "1e3") through BigDecimal. */
+    private static long parseLong(final String text) {
+        try {
+            return Long.parseLong(text);
+        } catch (final NumberFormatException e) {
+            return new BigDecimal(text).toBigIntegerExact().longValueExact();
+        }
     }
 
     private static double toDouble(final Object value) {
@@ -337,6 +401,10 @@ final class RowBinaryEncoder implements RowEncoder {
     }
 
     private static Instant toInstant(final String text, final ZoneId zone) {
+        final Instant fast = parseIsoInstant(text, zone);
+        if (fast != null) {
+            return fast;
+        }
         final String iso = text.length() > 10 && text.charAt(10) == ' ' ? text.substring(0, 10) + 'T' + text.substring(11) : text;
         try {
             return OffsetDateTime.parse(iso).toInstant();
@@ -347,6 +415,80 @@ final class RowBinaryEncoder implements RowEncoder {
                 return LocalDateTime.parse(iso).atZone(zone).toInstant();
             }
         }
+    }
+
+    /**
+     * Parses {@code yyyy-MM-dd[T ]HH:mm:ss[.fraction][Z|+HH:mm|-HH:mm]} without java.time's
+     * formatter machinery. Returns null for anything else, so the caller can fall back.
+     */
+    static Instant parseIsoInstant(final String s, final ZoneId zone) {
+        final int n = s.length();
+        if (n < 19 || s.charAt(4) != '-' || s.charAt(7) != '-' || (s.charAt(10) != 'T' && s.charAt(10) != ' ')
+                || s.charAt(13) != ':' || s.charAt(16) != ':') {
+            return null;
+        }
+        final int year = digits(s, 0, 4);
+        final int month = digits(s, 5, 7);
+        final int day = digits(s, 8, 10);
+        final int hour = digits(s, 11, 13);
+        final int minute = digits(s, 14, 16);
+        final int second = digits(s, 17, 19);
+        if (year < 0 || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+            return null;
+        }
+        int pos = 19;
+        int nanos = 0;
+        if (pos < n && s.charAt(pos) == '.') {
+            pos++;
+            int scale = 0;
+            while (pos < n && scale < 9 && Character.isDigit(s.charAt(pos))) {
+                nanos = nanos * 10 + (s.charAt(pos) - '0');
+                scale++;
+                pos++;
+            }
+            if (scale == 0) {
+                return null;
+            }
+            for (; scale < 9; scale++) {
+                nanos *= 10;
+            }
+        }
+        final long localSeconds = daysFromCivil(year, month, day) * 86_400L + hour * 3_600L + minute * 60L + second;
+        if (pos == n) {
+            // no offset: interpret in the local zone, as for LocalDateTime
+            return LocalDateTime.of(year, month, day, hour, minute, second, nanos).atZone(zone).toInstant();
+        }
+        final char sign = s.charAt(pos);
+        if (sign == 'Z' && pos == n - 1) {
+            return Instant.ofEpochSecond(localSeconds, nanos);
+        }
+        if ((sign == '+' || sign == '-') && n - pos == 6 && s.charAt(pos + 3) == ':') {
+            final int offset = digits(s, pos + 1, pos + 3) * 3_600 + digits(s, pos + 4, pos + 6) * 60;
+            return Instant.ofEpochSecond(localSeconds - (sign == '+' ? offset : -offset), nanos);
+        }
+        return null;
+    }
+
+    private static int digits(final String s, final int from, final int to) {
+        int v = 0;
+        for (int i = from; i < to; i++) {
+            final char c = s.charAt(i);
+            if (c < '0' || c > '9') {
+                return -1;
+            }
+            v = v * 10 + (c - '0');
+        }
+        return v;
+    }
+
+    /** Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's days_from_civil). */
+    private static long daysFromCivil(int y, final int m, final int d) {
+        y -= m <= 2 ? 1 : 0;
+        final long era = (y >= 0 ? y : y - 399) / 400;
+        final long yoe = y - era * 400;
+        final long doy = (153L * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+        final long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        return era * 146_097 + doe - 719_468;
     }
 
     private static long toDateTime64(final Instant instant, final int scale) {
@@ -378,12 +520,34 @@ final class RowBinaryEncoder implements RowEncoder {
 
     private static void writeDecimal(final OutputStream out, final ClickHouseColumn column, final Object value) throws IOException {
         final int precision = column.getPrecision();
-        final BigInteger unscaled = toBigDecimal(value).setScale(column.getScale(), RoundingMode.HALF_UP).unscaledValue();
-        if (unscaled.abs().toString().length() > precision) {
+        final BigDecimal scaled = toBigDecimal(value).setScale(column.getScale(), RoundingMode.HALF_UP);
+        if (scaled.precision() > precision) {
             throw new IllegalArgumentException("value " + value + " does not fit in Decimal(" + precision + ", " + column.getScale() + ")");
         }
-        final int width = precision <= 9 ? 4 : precision <= 18 ? 8 : precision <= 38 ? 16 : 32;
-        writeBigIntegerLE(out, unscaled, width, null, null);
+        if (precision <= 9) {
+            writeIntLE(out, (int) scaled.unscaledValue().longValueExact());
+        } else if (precision <= 18) {
+            writeLongLE(out, scaled.unscaledValue().longValueExact());
+        } else {
+            writeBigIntegerLE(out, scaled.unscaledValue(), precision <= 38 ? 16 : 32, null, null);
+        }
+    }
+
+    private static void writeUInt64(final OutputStream out, final Object value) throws IOException {
+        if (value instanceof Long || value instanceof Integer || value instanceof Short || value instanceof Byte) {
+            final long v = ((Number) value).longValue();
+            if (v >= 0) {
+                writeLongLE(out, v);
+                return;
+            }
+        } else if (value instanceof CharSequence s && s.length() <= 18) {
+            final long v = parseLong(s.toString().trim());
+            if (v >= 0) {
+                writeLongLE(out, v);
+                return;
+            }
+        }
+        writeBigIntegerLE(out, toBigInteger(value), 8, BigInteger.ZERO, UINT64_MAX);
     }
 
     private static void writeString(final OutputStream out, final byte[] bytes) throws IOException {
@@ -442,16 +606,12 @@ final class RowBinaryEncoder implements RowEncoder {
     }
 
     private static void writeIntLE(final OutputStream out, final int v) throws IOException {
-        out.write(v & 0xFF);
-        out.write((v >>> 8) & 0xFF);
-        out.write((v >>> 16) & 0xFF);
-        out.write((v >>> 24) & 0xFF);
+        out.write(new byte[]{(byte) v, (byte) (v >>> 8), (byte) (v >>> 16), (byte) (v >>> 24)}, 0, 4);
     }
 
     private static void writeLongLE(final OutputStream out, final long v) throws IOException {
-        for (int i = 0; i < 8; i++) {
-            out.write((int) ((v >>> (8 * i)) & 0xFF));
-        }
+        out.write(new byte[]{(byte) v, (byte) (v >>> 8), (byte) (v >>> 16), (byte) (v >>> 24),
+                (byte) (v >>> 32), (byte) (v >>> 40), (byte) (v >>> 48), (byte) (v >>> 56)}, 0, 8);
     }
 
     /** Two's complement, little-endian, exactly {@code width} bytes. */
